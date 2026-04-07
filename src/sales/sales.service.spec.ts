@@ -51,9 +51,7 @@ describe('SalesService', () => {
     };
     const refundDoc = { _id: 'refund-1' };
 
-    jest
-      .spyOn(service as any, 'supportsTransactions')
-      .mockResolvedValue(false);
+    jest.spyOn(service as any, 'supportsTransactions').mockResolvedValue(false);
     jest
       .spyOn(service as any, 'nextReceiptNumber')
       .mockResolvedValue('20260319000001');
@@ -182,9 +180,11 @@ describe('SalesService', () => {
       .mockReturnValueOnce({
         select: jest.fn().mockReturnThis(),
         lean: jest.fn().mockReturnThis(),
-        exec: jest.fn().mockResolvedValue([
-          { _id: 'sale-1', receiptNumber: '20260319000001' },
-        ]),
+        exec: jest
+          .fn()
+          .mockResolvedValue([
+            { _id: 'sale-1', receiptNumber: '20260319000001' },
+          ]),
       });
 
     saleModel.countDocuments.mockReturnValue({
@@ -302,5 +302,161 @@ describe('SalesService', () => {
     );
     expect(projectStage.$project.netCash).toEqual(refundAdjustedCashFormula);
     expect(projectStage.$project.netSales).toEqual(netSalesFormula);
+  });
+
+  it('builds a sales summary for the selected and previous date ranges', async () => {
+    saleModel.aggregate
+      .mockReturnValueOnce({
+        exec: jest.fn().mockResolvedValue([
+          {
+            totals: [
+              {
+                currency: 'PHP',
+                grossSales: 1000,
+                refunds: 100,
+                discounts: 50,
+                netSales: 850,
+                salesTransactions: 2,
+                refundTransactions: 1,
+                receipts: 3,
+              },
+            ],
+            costOfGoods: [{ costOfGoods: 400 }],
+            series: [
+              {
+                x: '2026-03-19',
+                grossSales: 1000,
+                refunds: 100,
+                discounts: 50,
+                netSales: 850,
+                salesTransactions: 2,
+                refundTransactions: 1,
+                receipts: 3,
+              },
+            ],
+            seriesCostOfGoods: [{ x: '2026-03-19', costOfGoods: 400 }],
+          },
+        ]),
+      })
+      .mockReturnValueOnce({
+        exec: jest.fn().mockResolvedValue([
+          {
+            totals: [
+              {
+                currency: 'PHP',
+                grossSales: 500,
+                refunds: 0,
+                discounts: 25,
+                netSales: 475,
+                salesTransactions: 1,
+                refundTransactions: 0,
+                receipts: 1,
+              },
+            ],
+            costOfGoods: [{ costOfGoods: 200 }],
+            series: [
+              {
+                x: '2026-03-18',
+                grossSales: 500,
+                refunds: 0,
+                discounts: 25,
+                netSales: 475,
+                salesTransactions: 1,
+                refundTransactions: 0,
+                receipts: 1,
+              },
+            ],
+            seriesCostOfGoods: [{ x: '2026-03-18', costOfGoods: 200 }],
+          },
+        ]),
+      });
+
+    const result = await service.reportSummary(
+      { startDate: '2026-03-19', endDate: '2026-03-19' },
+      'store-1',
+    );
+
+    expect(result).toMatchObject({
+      from: '2026-03-19T00:00:00.000Z',
+      to: '2026-03-19T23:59:59.999Z',
+      previousFrom: '2026-03-18T00:00:00.000Z',
+      previousTo: '2026-03-18T23:59:59.999Z',
+      currency: 'PHP',
+      bucket: 'day',
+      current: {
+        totals: {
+          grossSales: 1000,
+          refunds: 100,
+          discounts: 50,
+          netSales: 850,
+          costOfGoods: 400,
+          grossProfit: 450,
+          salesTransactions: 2,
+          refundTransactions: 1,
+          receipts: 3,
+          averageSale: 425,
+        },
+        series: [
+          {
+            x: '2026-03-19',
+            grossSales: 1000,
+            refunds: 100,
+            discounts: 50,
+            netSales: 850,
+            costOfGoods: 400,
+            grossProfit: 450,
+            salesTransactions: 2,
+            refundTransactions: 1,
+            receipts: 3,
+          },
+        ],
+      },
+      previous: {
+        totals: {
+          grossSales: 500,
+          refunds: 0,
+          discounts: 25,
+          netSales: 475,
+          costOfGoods: 200,
+          grossProfit: 275,
+          salesTransactions: 1,
+          refundTransactions: 0,
+          receipts: 1,
+          averageSale: 475,
+        },
+      },
+    });
+
+    expect(saleModel.aggregate).toHaveBeenCalledTimes(2);
+
+    const currentPipeline = saleModel.aggregate.mock.calls[0][0];
+    const previousPipeline = saleModel.aggregate.mock.calls[1][0];
+
+    expect(currentPipeline[0]).toEqual({
+      $match: {
+        storeId: 'store-1',
+        createdAt: {
+          $gte: new Date('2026-03-19T00:00:00.000Z'),
+          $lte: new Date('2026-03-19T23:59:59.999Z'),
+        },
+      },
+    });
+    expect(previousPipeline[0]).toEqual({
+      $match: {
+        storeId: 'store-1',
+        createdAt: {
+          $gte: new Date('2026-03-18T00:00:00.000Z'),
+          $lte: new Date('2026-03-18T23:59:59.999Z'),
+        },
+      },
+    });
+    expect(currentPipeline[1].$facet).toEqual(
+      expect.objectContaining({
+        totals: expect.any(Array),
+        costOfGoods: expect.any(Array),
+        series: expect.any(Array),
+        seriesCostOfGoods: expect.any(Array),
+      }),
+    );
   });
 });

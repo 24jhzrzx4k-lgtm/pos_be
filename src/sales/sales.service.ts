@@ -20,6 +20,10 @@ import type {
   SalesByPaymentTypeRow,
   SalesItemSeries,
   SalesReportBucket,
+  SalesSummaryRange,
+  SalesSummaryReport,
+  SalesSummarySeriesPoint,
+  SalesSummaryTotals,
 } from './dto/sales-reports.dto';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { RefundSaleDto } from './dto/refund-sale.dto';
@@ -233,7 +237,9 @@ export class SalesService {
   }
 
   private parseReportRange(query: any): { from: Date; to: Date } {
-    const from = this.parseDate(query?.from ?? query?.start ?? query?.startDate);
+    const from = this.parseDate(
+      query?.from ?? query?.start ?? query?.startDate,
+    );
     const to = this.parseDate(query?.to ?? query?.end ?? query?.endDate, {
       endOfDay: true,
     });
@@ -907,7 +913,9 @@ export class SalesService {
         .lean()
         .exec();
 
-      const sourceSaleIds = sourceSales.map((sale: any) => String(sale?._id ?? ''));
+      const sourceSaleIds = sourceSales.map((sale: any) =>
+        String(sale?._id ?? ''),
+      );
 
       filter.$or = [
         { posId: { $regex: q, $options: 'i' } },
@@ -932,7 +940,9 @@ export class SalesService {
     ]);
 
     const refundSourceSaleIds = data
-      .filter((sale: any) => sale?.transactionType === SaleTransactionType.Refund)
+      .filter(
+        (sale: any) => sale?.transactionType === SaleTransactionType.Refund,
+      )
       .map((sale: any) => String(sale?.sourceSaleId ?? '').trim())
       .filter((id: string) => id.length > 0);
 
@@ -1018,6 +1028,356 @@ export class SalesService {
 
     if (!updated) throw new NotFoundException('Sale not found');
     return updated;
+  }
+
+  private salesSummaryMetricStages(): PipelineStage[] {
+    const num = (input: any) => ({
+      $convert: { input, to: 'double', onError: 0, onNull: 0 },
+    });
+
+    return [
+      {
+        $addFields: {
+          __amount: {
+            $abs: num({
+              $ifNull: [
+                '$totals.amountDue',
+                { $ifNull: ['$totals.amountPaid', 0] },
+              ],
+            }),
+          },
+          __discounts: {
+            $sum: {
+              $map: {
+                input: { $ifNull: ['$discounts', []] },
+                as: 'discount',
+                in: num({
+                  $ifNull: [
+                    '$$discount.amount',
+                    {
+                      $ifNull: [
+                        '$$discount.value',
+                        {
+                          $ifNull: [
+                            '$$discount.discount',
+                            { $ifNull: ['$$discount.discountAmount', 0] },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                }),
+              },
+            },
+          },
+          __isRefund: {
+            $eq: ['$transactionType', SaleTransactionType.Refund],
+          },
+          __currency: {
+            $trim: { input: { $ifNull: ['$currency', 'PHP'] } },
+          },
+        },
+      },
+    ];
+  }
+
+  private salesSummaryTotalsGroupStage(): PipelineStage.Group {
+    return {
+      $group: {
+        _id: null,
+        currency: { $first: '$__currency' },
+        grossSales: {
+          $sum: { $cond: ['$__isRefund', 0, '$__amount'] },
+        },
+        refunds: {
+          $sum: { $cond: ['$__isRefund', '$__amount', 0] },
+        },
+        discounts: {
+          $sum: { $cond: ['$__isRefund', 0, '$__discounts'] },
+        },
+        salesTransactions: {
+          $sum: { $cond: ['$__isRefund', 0, 1] },
+        },
+        refundTransactions: {
+          $sum: { $cond: ['$__isRefund', 1, 0] },
+        },
+      },
+    };
+  }
+
+  private salesSummaryTotalsProjectStage(): PipelineStage.Project {
+    return {
+      $project: {
+        _id: 0,
+        currency: {
+          $cond: [
+            { $gt: [{ $strLenCP: { $ifNull: ['$currency', ''] } }, 0] },
+            '$currency',
+            'PHP',
+          ],
+        },
+        grossSales: 1,
+        refunds: 1,
+        discounts: 1,
+        netSales: {
+          $subtract: [{ $subtract: ['$grossSales', '$refunds'] }, '$discounts'],
+        },
+        salesTransactions: 1,
+        refundTransactions: 1,
+        receipts: { $add: ['$salesTransactions', '$refundTransactions'] },
+      },
+    };
+  }
+
+  private zeroSalesSummaryTotals(): SalesSummaryTotals {
+    return {
+      grossSales: 0,
+      refunds: 0,
+      discounts: 0,
+      netSales: 0,
+      costOfGoods: 0,
+      grossProfit: 0,
+      salesTransactions: 0,
+      refundTransactions: 0,
+      receipts: 0,
+      averageSale: 0,
+    };
+  }
+
+  private normalizeSalesSummaryTotals(row: any): SalesSummaryTotals {
+    const grossSales = Number(row?.grossSales ?? 0);
+    const refunds = Number(row?.refunds ?? 0);
+    const discounts = Number(row?.discounts ?? 0);
+    const netSales = Number(row?.netSales ?? grossSales - refunds - discounts);
+    const costOfGoods = Number(row?.costOfGoods ?? 0);
+    const salesTransactions = Number(row?.salesTransactions ?? 0);
+    const refundTransactions = Number(row?.refundTransactions ?? 0);
+    const receipts = Number(
+      row?.receipts ?? salesTransactions + refundTransactions,
+    );
+
+    return {
+      grossSales,
+      refunds,
+      discounts,
+      netSales,
+      costOfGoods,
+      grossProfit: netSales - costOfGoods,
+      salesTransactions,
+      refundTransactions,
+      receipts,
+      averageSale: salesTransactions > 0 ? netSales / salesTransactions : 0,
+    };
+  }
+
+  private mergeSalesSummarySeries(
+    salesRows: any[],
+    costRows: any[],
+  ): SalesSummarySeriesPoint[] {
+    const map = new Map<string, SalesSummarySeriesPoint>();
+
+    for (const row of salesRows ?? []) {
+      const key = String(row?.x ?? '').trim();
+      if (!key) continue;
+      const totals = this.normalizeSalesSummaryTotals(row);
+      map.set(key, {
+        x: key,
+        ...totals,
+      });
+    }
+
+    for (const row of costRows ?? []) {
+      const key = String(row?.x ?? '').trim();
+      if (!key) continue;
+
+      const existing = map.get(key) ?? {
+        x: key,
+        ...this.zeroSalesSummaryTotals(),
+      };
+      const costOfGoods = Number(row?.costOfGoods ?? 0);
+
+      map.set(key, {
+        ...existing,
+        costOfGoods,
+        grossProfit: existing.netSales - costOfGoods,
+      });
+    }
+
+    return Array.from(map.values()).sort((a, b) => a.x.localeCompare(b.x));
+  }
+
+  private previousReportRange(from: Date, to: Date): { from: Date; to: Date } {
+    const durationMs = to.getTime() - from.getTime() + 1;
+    const previousTo = new Date(from.getTime() - 1);
+    const previousFrom = new Date(from.getTime() - durationMs);
+    return { from: previousFrom, to: previousTo };
+  }
+
+  private async aggregateSalesSummaryRange(
+    match: Record<string, unknown>,
+    from: Date,
+    to: Date,
+    bucket: SalesReportBucket,
+  ): Promise<SalesSummaryRange & { currency: string }> {
+    const dateKey = {
+      $dateTrunc: { date: '$createdAt', unit: bucket, timezone: 'UTC' },
+    };
+    const dateLabel = {
+      $dateToString: {
+        date: '$_id',
+        timezone: 'UTC',
+        format: '%Y-%m-%d',
+      },
+    };
+
+    const pipeline: PipelineStage[] = [
+      { $match: match },
+      {
+        $facet: {
+          totals: [
+            ...this.salesSummaryMetricStages(),
+            this.salesSummaryTotalsGroupStage(),
+            this.salesSummaryTotalsProjectStage(),
+          ],
+          costOfGoods: [
+            ...this.itemLineStages(),
+            {
+              $group: {
+                _id: null,
+                costOfGoods: { $sum: '$__signedCostOfGoods' },
+              },
+            },
+          ],
+          series: [
+            ...this.salesSummaryMetricStages(),
+            {
+              $group: {
+                _id: dateKey,
+                grossSales: {
+                  $sum: { $cond: ['$__isRefund', 0, '$__amount'] },
+                },
+                refunds: {
+                  $sum: { $cond: ['$__isRefund', '$__amount', 0] },
+                },
+                discounts: {
+                  $sum: { $cond: ['$__isRefund', 0, '$__discounts'] },
+                },
+                salesTransactions: {
+                  $sum: { $cond: ['$__isRefund', 0, 1] },
+                },
+                refundTransactions: {
+                  $sum: { $cond: ['$__isRefund', 1, 0] },
+                },
+              },
+            },
+            {
+              $project: {
+                _id: 0,
+                x: dateLabel,
+                grossSales: 1,
+                refunds: 1,
+                discounts: 1,
+                netSales: {
+                  $subtract: [
+                    { $subtract: ['$grossSales', '$refunds'] },
+                    '$discounts',
+                  ],
+                },
+                salesTransactions: 1,
+                refundTransactions: 1,
+                receipts: {
+                  $add: ['$salesTransactions', '$refundTransactions'],
+                },
+              },
+            },
+            { $sort: { x: 1 } },
+          ],
+          seriesCostOfGoods: [
+            ...this.itemLineStages(),
+            {
+              $group: {
+                _id: dateKey,
+                costOfGoods: { $sum: '$__signedCostOfGoods' },
+              },
+            },
+            {
+              $project: {
+                _id: 0,
+                x: dateLabel,
+                costOfGoods: 1,
+              },
+            },
+            { $sort: { x: 1 } },
+          ],
+        },
+      } as any,
+    ];
+
+    const result = await this.saleModel.aggregate(pipeline).exec();
+
+    const facet = result?.[0] ?? {
+      totals: [],
+      costOfGoods: [],
+      series: [],
+      seriesCostOfGoods: [],
+    };
+    const totalsRow = facet.totals?.[0] ?? {};
+    const costOfGoods = Number(facet.costOfGoods?.[0]?.costOfGoods ?? 0);
+    const totals = this.normalizeSalesSummaryTotals({
+      ...totalsRow,
+      costOfGoods,
+    });
+
+    return {
+      from: from.toISOString(),
+      to: to.toISOString(),
+      currency: String(totalsRow?.currency ?? 'PHP'),
+      totals,
+      series: this.mergeSalesSummarySeries(
+        facet.series ?? [],
+        facet.seriesCostOfGoods ?? [],
+      ),
+    };
+  }
+
+  async reportSummary(
+    query: any,
+    storeId?: string,
+  ): Promise<SalesSummaryReport> {
+    const { match, from, to } = this.baseMatchForReports(query, storeId);
+    const bucket = this.parseBucket(query);
+    const previous = this.previousReportRange(from, to);
+
+    const [currentRange, previousRange] = await Promise.all([
+      this.aggregateSalesSummaryRange(match, from, to, bucket),
+      this.aggregateSalesSummaryRange(
+        { ...match, createdAt: { $gte: previous.from, $lte: previous.to } },
+        previous.from,
+        previous.to,
+        bucket,
+      ),
+    ]);
+
+    return {
+      from: currentRange.from,
+      to: currentRange.to,
+      previousFrom: previousRange.from,
+      previousTo: previousRange.to,
+      currency: currentRange.currency || previousRange.currency || 'PHP',
+      bucket,
+      current: {
+        from: currentRange.from,
+        to: currentRange.to,
+        totals: currentRange.totals,
+        series: currentRange.series,
+      },
+      previous: {
+        from: previousRange.from,
+        to: previousRange.to,
+        totals: previousRange.totals,
+        series: previousRange.series,
+      },
+    };
   }
 
   async reportByItem(
@@ -1857,10 +2217,7 @@ export class SalesService {
                                 $ifNull: [
                                   '$$discount.discount',
                                   {
-                                    $ifNull: [
-                                      '$$discount.discountAmount',
-                                      0,
-                                    ],
+                                    $ifNull: ['$$discount.discountAmount', 0],
                                   },
                                 ],
                               },
@@ -2019,9 +2376,7 @@ export class SalesService {
       },
     ];
 
-    const result = await this.saleModel
-      .aggregate(pipeline)
-      .exec();
+    const result = await this.saleModel.aggregate(pipeline).exec();
 
     const facet = result?.[0] ?? { summary: [], costOfGoods: [] };
     const summary = facet.summary?.[0] ?? {};

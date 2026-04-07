@@ -12,6 +12,7 @@ describe('SalesController', () => {
     reportByCategory: jest.fn(),
     reportByEmployee: jest.fn(),
     reportByPaymentType: jest.fn(),
+    reportSummary: jest.fn(),
     reportReceipts: jest.fn(),
     reportEndOfDayCash: jest.fn(),
     findOne: jest.fn(),
@@ -88,5 +89,19 @@ describe('SalesController', () => {
       query,
       'store-1',
     );
+  });
+
+  it('delegates sales summary reports using the request store scope', () => {
+    const req = {
+      user: {
+        storeId: 'store-1',
+        role: 'cashier',
+      },
+    };
+    const query = { startDate: '2026-03-19', endDate: '2026-03-19' };
+
+    controller.reportSummary(req, query);
+
+    expect(salesService.reportSummary).toHaveBeenCalledWith(query, 'store-1');
   });
 });

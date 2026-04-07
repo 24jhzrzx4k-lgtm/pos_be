@@ -140,6 +140,12 @@ export class SalesController {
     return this.salesService.reportByPaymentType(query, storeId);
   }
 
+  @Get('reports/summary')
+  reportSummary(@Req() req: any, @Query() query: any) {
+    const storeId = resolveStoreIdForRequest(query, req?.user);
+    return this.salesService.reportSummary(query, storeId);
+  }
+
   @Get('reports/receipts')
   reportReceipts(@Req() req: any, @Query() query: any) {
     const storeId = resolveStoreIdForRequest(query, req?.user);

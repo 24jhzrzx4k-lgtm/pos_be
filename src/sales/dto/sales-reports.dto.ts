@@ -62,6 +62,50 @@ export type SalesItemSeries = {
   points: SalesSeriesPoint[];
 };
 
+export type SalesSummaryTotals = {
+  grossSales: number;
+  refunds: number;
+  discounts: number;
+  netSales: number;
+  costOfGoods: number;
+  grossProfit: number;
+  salesTransactions: number;
+  refundTransactions: number;
+  receipts: number;
+  averageSale: number;
+};
+
+export type SalesSummarySeriesPoint = {
+  x: string;
+  grossSales: number;
+  refunds: number;
+  discounts: number;
+  netSales: number;
+  costOfGoods: number;
+  grossProfit: number;
+  salesTransactions: number;
+  refundTransactions: number;
+  receipts: number;
+};
+
+export type SalesSummaryRange = {
+  from: string;
+  to: string;
+  totals: SalesSummaryTotals;
+  series: SalesSummarySeriesPoint[];
+};
+
+export type SalesSummaryReport = {
+  from: string;
+  to: string;
+  previousFrom: string;
+  previousTo: string;
+  currency: string;
+  bucket: SalesReportBucket;
+  current: SalesSummaryRange;
+  previous: SalesSummaryRange;
+};
+
 export type ReceiptsReportRow = {
   id: string;
   receiptNo: string;
