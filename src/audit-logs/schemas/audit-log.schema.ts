@@ -38,6 +38,9 @@ export class AuditLog {
   @Prop({ trim: true })
   resourceId?: string;
 
+  @Prop({ trim: true })
+  resourceName?: string;
+
   @Prop({ min: 0 })
   beforeStock?: number;
 

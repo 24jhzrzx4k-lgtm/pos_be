@@ -7,6 +7,7 @@ import { AuditLog, AuditLogDocument } from './schemas/audit-log.schema';
 const ITEM_CREATE_PATH_REGEX = /^\/items(?:\?.*)?$/;
 const ITEM_UPDATE_PATH_REGEX = /^\/items\/[^/?]+(?:\?.*)?$/;
 const ITEM_STOCK_PATH_REGEX = /^\/items\/[^/?]+\/stock(?:\?.*)?$/;
+const ITEM_DELETE_PATH_REGEX = /^\/items\/[^/?]+(?:\?.*)?$/;
 
 export type ItemStockAuditLog = AuditLog & {
   _id?: unknown;
@@ -18,6 +19,17 @@ export type ItemStockAuditLog = AuditLog & {
   afterStock?: number;
   beforeTrackStock?: boolean;
   afterTrackStock?: boolean;
+  user?: Record<string, unknown>;
+  item?: Record<string, unknown>;
+};
+
+export type DeletedItemAuditLog = AuditLog & {
+  _id?: unknown;
+  createdAt?: Date;
+  updatedAt?: Date;
+  itemId?: string;
+  itemName?: string;
+  action: 'deleted';
   user?: Record<string, unknown>;
   item?: Record<string, unknown>;
 };
@@ -43,6 +55,27 @@ export class AuditLogsService {
     const rows = Array.isArray(result?.data) ? result.data : [];
     const total = Number(result?.total?.[0]?.count ?? 0);
     const data = rows.map((row) => this.mapItemStockAuditLog(row as any));
+
+    return {
+      data,
+      page,
+      limit,
+      total,
+      hasNext: skip + data.length < total,
+      hasPrev: page > 1,
+    };
+  }
+
+  async findDeletedItems(query?: any): Promise<PaginationResult<DeletedItemAuditLog>> {
+    const { page, limit, skip } = parsePagination(query, {
+      defaultLimit: 20,
+      maxLimit: 200,
+    });
+    const pipeline = this.buildDeletedItemsPipeline(query, skip, limit);
+    const [result] = await this.auditLogModel.aggregate(pipeline).exec();
+    const rows = Array.isArray(result?.data) ? result.data : [];
+    const total = Number(result?.total?.[0]?.count ?? 0);
+    const data = rows.map((row) => this.mapDeletedItemAuditLog(row as any));
 
     return {
       data,
@@ -147,6 +180,99 @@ export class AuditLogsService {
     return pipeline;
   }
 
+  private buildDeletedItemsPipeline(
+    query: any,
+    skip: number,
+    limit: number,
+  ): PipelineStage[] {
+    const pipeline: PipelineStage[] = [
+      {
+        $match: this.buildDeletedItemsMatch(query),
+      },
+      {
+        $addFields: {
+          itemId: { $ifNull: ['$params.id', '$resourceId'] },
+          itemName: { $ifNull: ['$resourceName', '$body.name'] },
+          action: 'deleted',
+        },
+      },
+    ];
+
+    const itemId =
+      typeof query?.itemId === 'string' ? query.itemId.trim() : '';
+    if (itemId) {
+      pipeline.push({
+        $match: { itemId },
+      });
+    }
+
+    pipeline.push(
+      { $sort: { timestamp: -1, createdAt: -1 } },
+      {
+        $facet: {
+          data: [
+            { $skip: skip },
+            { $limit: limit },
+            {
+              $lookup: {
+                from: 'users',
+                let: { auditUserId: '$userId' },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $eq: [{ $toString: '$_id' }, '$$auditUserId'],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      passwordHash: 0,
+                      pos_pin: 0,
+                      __v: 0,
+                    },
+                  },
+                ],
+                as: 'user',
+              },
+            },
+            {
+              $lookup: {
+                from: 'items',
+                let: { auditItemId: '$itemId' },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $eq: [{ $toString: '$_id' }, '$$auditItemId'],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      __v: 0,
+                    },
+                  },
+                ],
+                as: 'item',
+              },
+            },
+            {
+              $addFields: {
+                user: { $arrayElemAt: ['$user', 0] },
+                item: { $arrayElemAt: ['$item', 0] },
+                itemName: { $ifNull: ['$itemName', '$item.name'] },
+              },
+            },
+          ],
+          total: [{ $count: 'count' }],
+        },
+      },
+    );
+
+    return pipeline;
+  }
+
   private buildItemStockChangesMatch(
     query?: any,
   ): FilterQuery<AuditLogDocument> {
@@ -174,6 +300,34 @@ export class AuditLogsService {
             path: ITEM_STOCK_PATH_REGEX,
           },
         ],
+      },
+    ];
+
+    const userId =
+      typeof query?.userId === 'string' ? query.userId.trim() : '';
+    if (userId) {
+      filters.push({ userId });
+    }
+
+    const from = this.parseDate(query?.from ?? query?.startDate);
+    const to = this.parseDate(query?.to ?? query?.endDate, true);
+    if (from || to) {
+      const timestamp: Record<string, Date> = {};
+      if (from) timestamp.$gte = from;
+      if (to) timestamp.$lte = to;
+      filters.push({ timestamp });
+    }
+
+    return filters.length === 1 ? filters[0] : { $and: filters };
+  }
+
+  private buildDeletedItemsMatch(
+    query?: any,
+  ): FilterQuery<AuditLogDocument> {
+    const filters: FilterQuery<AuditLogDocument>[] = [
+      {
+        method: 'DELETE',
+        path: ITEM_DELETE_PATH_REGEX,
       },
     ];
 
@@ -236,6 +390,36 @@ export class AuditLogsService {
         typeof row?.afterTrackStock === 'boolean'
           ? row.afterTrackStock
           : undefined,
+      user:
+        row?.user && typeof row.user === 'object' && !Array.isArray(row.user)
+          ? row.user
+          : undefined,
+      item:
+        row?.item && typeof row.item === 'object' && !Array.isArray(row.item)
+          ? row.item
+          : undefined,
+    };
+  }
+
+  private mapDeletedItemAuditLog(
+    row: Record<string, any>,
+  ): DeletedItemAuditLog {
+    const rawItemId = row?.itemId ?? row?.params?.id ?? row?.resourceId;
+    const itemId =
+      rawItemId === undefined || rawItemId === null
+        ? undefined
+        : String(rawItemId).trim() || undefined;
+    const rawItemName = row?.itemName ?? row?.resourceName ?? row?.item?.name;
+    const itemName =
+      rawItemName === undefined || rawItemName === null
+        ? undefined
+        : String(rawItemName).trim() || undefined;
+
+    return {
+      ...(row as AuditLog),
+      itemId,
+      itemName,
+      action: 'deleted',
       user:
         row?.user && typeof row.user === 'object' && !Array.isArray(row.user)
           ? row.user

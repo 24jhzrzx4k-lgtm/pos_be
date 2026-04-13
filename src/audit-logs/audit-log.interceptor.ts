@@ -26,10 +26,17 @@ const SENSITIVE_KEYS = new Set([
 const ITEM_CREATE_PATH_REGEX = /^\/items(?:\?.*)?$/;
 const ITEM_UPDATE_PATH_REGEX = /^\/items\/[^/?]+(?:\?.*)?$/;
 const ITEM_STOCK_PATH_REGEX = /^\/items\/[^/?]+\/stock(?:\?.*)?$/;
+const ITEM_DELETE_PATH_REGEX = /^\/items\/[^/?]+(?:\?.*)?$/;
 
 type StockSnapshot = {
   stock?: number;
   trackStock?: boolean;
+};
+
+type ItemAuditContext = {
+  resourceId?: string;
+  resourceName?: string;
+  stockSnapshot: StockSnapshot;
 };
 
 function sanitize(value: unknown, depth = 0): unknown {
@@ -71,6 +78,19 @@ function extractResourceId(value: unknown): string | undefined {
 
   const record = value as Record<string, unknown>;
   const raw = record._id ?? record.id;
+  if (raw === undefined || raw === null) return undefined;
+
+  const normalized = String(raw).trim();
+  return normalized || undefined;
+}
+
+function extractResourceName(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const raw = record.name ?? record.title ?? record.label;
   if (raw === undefined || raw === null) return undefined;
 
   const normalized = String(raw).trim();
@@ -131,6 +151,10 @@ function isStockAuditRequest(method: string, path: string, body: unknown) {
       touchesStock) ||
     (method === 'PATCH' && ITEM_STOCK_PATH_REGEX.test(path))
   );
+}
+
+function isItemDeleteRequest(method: string, path: string) {
+  return method === 'DELETE' && ITEM_DELETE_PATH_REGEX.test(path);
 }
 
 @Injectable()
@@ -196,19 +220,32 @@ export class AuditLogInterceptor implements NestInterceptor {
     const query = sanitize(req?.query) as Record<string, unknown> | undefined;
     const body = sanitize(req?.body);
     const stockAuditRequest = isStockAuditRequest(method, path, body);
+    const itemDeleteRequest = isItemDeleteRequest(method, path);
     const requestedItemId =
       typeof req?.params?.id === 'string' ? req.params.id.trim() : undefined;
-    const beforeSnapshotPromise: Promise<StockSnapshot> =
-      stockAuditRequest && requestedItemId
+    const beforeItemPromise: Promise<ItemAuditContext> =
+      (stockAuditRequest || itemDeleteRequest) && requestedItemId
         ? this.itemModel
             .findById(requestedItemId)
-            .select({ inStock: 1, trackStock: 1 })
+            .select({ name: 1, inStock: 1, trackStock: 1 })
             .lean()
             .exec()
-            .then((item) => extractStockSnapshot(item))
-            .catch(() => ({} as StockSnapshot))
-        : Promise.resolve({} as StockSnapshot);
+            .then((item) => ({
+              resourceId: extractResourceId(item),
+              resourceName: extractResourceName(item),
+              stockSnapshot: extractStockSnapshot(item),
+            }))
+            .catch(
+              () =>
+                ({
+                  stockSnapshot: {},
+                }) as ItemAuditContext,
+            )
+        : Promise.resolve({
+            stockSnapshot: {},
+          } as ItemAuditContext);
     let resourceId: string | undefined;
+    let resourceName: string | undefined;
     let afterSnapshot: StockSnapshot = {};
 
     const writeLog = async (
@@ -220,7 +257,8 @@ export class AuditLogInterceptor implements NestInterceptor {
       },
     ) => {
       try {
-        const beforeSnapshot = await beforeSnapshotPromise;
+        const beforeItem = await beforeItemPromise;
+        const beforeSnapshot = beforeItem.stockSnapshot;
         await this.auditLogsService.create({
           timestamp,
           method,
@@ -231,7 +269,8 @@ export class AuditLogInterceptor implements NestInterceptor {
           userAgent: userAgent || undefined,
           userId: user.userId,
           userRole: user.userRole,
-          resourceId,
+          resourceId: resourceId ?? beforeItem.resourceId,
+          resourceName: resourceName ?? beforeItem.resourceName,
           beforeStock: isFiniteNumber(beforeSnapshot.stock)
             ? beforeSnapshot.stock
             : undefined,
@@ -264,6 +303,7 @@ export class AuditLogInterceptor implements NestInterceptor {
           next: (responseBody) => {
             const sanitizedResponseBody = sanitize(responseBody);
             resourceId = extractResourceId(sanitizedResponseBody);
+            resourceName = extractResourceName(sanitizedResponseBody);
             afterSnapshot = extractStockSnapshot(sanitizedResponseBody);
           },
           complete: () => {

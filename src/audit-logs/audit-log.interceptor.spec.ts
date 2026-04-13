@@ -120,4 +120,55 @@ describe('AuditLogInterceptor', () => {
       }),
     );
   });
+
+  it('logs deleted item identity so details remain available after removal', async () => {
+    itemModel.findById.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockReturnValue({
+          exec: jest.fn().mockResolvedValue({
+            _id: 'item-3',
+            name: 'Deleted Cola',
+            inStock: 8,
+            trackStock: true,
+          }),
+        }),
+      }),
+    });
+
+    const req = {
+      method: 'DELETE',
+      originalUrl: '/items/item-3',
+      params: { id: 'item-3' },
+      body: {},
+      query: {},
+      headers: {},
+      ip: '127.0.0.1',
+      user: { sub: 'user-1', role: 'admin' },
+    };
+    const res = { statusCode: 200 };
+    const next = {
+      handle: () =>
+        of({
+          deleted: true,
+          id: 'item-3',
+        }),
+    };
+
+    await new Promise<void>((resolve, reject) => {
+      interceptor.intercept(createHttpContext(req, res), next as any).subscribe({
+        complete: () => resolve(),
+        error: reject,
+      });
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(auditLogsService.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resourceId: 'item-3',
+        resourceName: 'Deleted Cola',
+        beforeStock: 8,
+        beforeTrackStock: true,
+      }),
+    );
+  });
 });

@@ -6,6 +6,7 @@ describe('AuditLogsController', () => {
   let controller: AuditLogsController;
   const auditLogsService = {
     findItemStockChanges: jest.fn(),
+    findDeletedItems: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -33,5 +34,13 @@ describe('AuditLogsController', () => {
     controller.findItemStockChanges(query);
 
     expect(auditLogsService.findItemStockChanges).toHaveBeenCalledWith(query);
+  });
+
+  it('delegates deleted item audit log lookups to the service', () => {
+    const query = { page: '1', userId: 'user-1' };
+
+    controller.findDeletedItems(query);
+
+    expect(auditLogsService.findDeletedItems).toHaveBeenCalledWith(query);
   });
 });

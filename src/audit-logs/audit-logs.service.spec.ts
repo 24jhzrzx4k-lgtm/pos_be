@@ -137,4 +137,89 @@ describe('AuditLogsService', () => {
       }),
     );
   });
+
+  it('aggregates deleted item audit logs and keeps the stored item name', async () => {
+    aggregateExec.mockResolvedValue([
+      {
+        data: [
+          {
+            _id: 'log-3',
+            timestamp: new Date('2026-04-13T04:00:00.000Z'),
+            method: 'DELETE',
+            path: '/items/item-3',
+            resourceId: 'item-3',
+            resourceName: 'Deleted Cola',
+            itemId: 'item-3',
+            itemName: 'Deleted Cola',
+            user: { _id: 'user-1', name: 'Admin', role: 'admin' },
+          },
+        ],
+        total: [{ count: 1 }],
+      },
+    ]);
+
+    const result = await service.findDeletedItems({
+      page: '1',
+      limit: '10',
+      itemId: 'item-3',
+      userId: 'user-1',
+      from: '2026-04-01',
+      to: '2026-04-13',
+    });
+
+    const pipeline = auditLogModel.aggregate.mock.calls[0][0];
+    const match = pipeline[0].$match;
+    const addFields = pipeline[1].$addFields;
+    const facet = pipeline[pipeline.length - 1].$facet;
+
+    expect(match.$and).toEqual(
+      expect.arrayContaining([
+        {
+          method: 'DELETE',
+          path: /^\/items\/[^/?]+(?:\?.*)?$/,
+        },
+        { userId: 'user-1' },
+        {
+          timestamp: {
+            $gte: new Date('2026-04-01T00:00:00.000Z'),
+            $lte: new Date('2026-04-13T23:59:59.999Z'),
+          },
+        },
+      ]),
+    );
+    expect(addFields).toEqual(
+      expect.objectContaining({
+        itemId: { $ifNull: ['$params.id', '$resourceId'] },
+        itemName: { $ifNull: ['$resourceName', '$body.name'] },
+        action: 'deleted',
+      }),
+    );
+    expect(pipeline[2]).toEqual({ $match: { itemId: 'item-3' } });
+    expect(facet.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          $lookup: expect.objectContaining({ from: 'users', as: 'user' }),
+        }),
+        expect.objectContaining({
+          $lookup: expect.objectContaining({ from: 'items', as: 'item' }),
+        }),
+      ]),
+    );
+    expect(result).toEqual({
+      data: [
+        expect.objectContaining({
+          _id: 'log-3',
+          itemId: 'item-3',
+          itemName: 'Deleted Cola',
+          action: 'deleted',
+          user: { _id: 'user-1', name: 'Admin', role: 'admin' },
+        }),
+      ],
+      page: 1,
+      limit: 10,
+      total: 1,
+      hasNext: false,
+      hasPrev: false,
+    });
+  });
 });
