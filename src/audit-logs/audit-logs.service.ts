@@ -1,7 +1,22 @@
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { FilterQuery, Model, PipelineStage } from 'mongoose';
+import { PaginationResult, parsePagination } from '../common/pagination';
 import { AuditLog, AuditLogDocument } from './schemas/audit-log.schema';
+
+const ITEM_CREATE_PATH_REGEX = /^\/items(?:\?.*)?$/;
+const ITEM_UPDATE_PATH_REGEX = /^\/items\/[^/?]+(?:\?.*)?$/;
+const ITEM_STOCK_PATH_REGEX = /^\/items\/[^/?]+\/stock(?:\?.*)?$/;
+
+export type ItemStockAuditLog = AuditLog & {
+  _id?: unknown;
+  createdAt?: Date;
+  updatedAt?: Date;
+  itemId?: string;
+  stockAction: 'created' | 'updated';
+  user?: Record<string, unknown>;
+  item?: Record<string, unknown>;
+};
 
 @Injectable()
 export class AuditLogsService {
@@ -12,5 +27,207 @@ export class AuditLogsService {
 
   async create(entry: Omit<AuditLog, never>) {
     return this.auditLogModel.create(entry);
+  }
+
+  async findItemStockChanges(query?: any): Promise<PaginationResult<ItemStockAuditLog>> {
+    const { page, limit, skip } = parsePagination(query, {
+      defaultLimit: 20,
+      maxLimit: 200,
+    });
+    const pipeline = this.buildItemStockChangesPipeline(query, skip, limit);
+    const [result] = await this.auditLogModel.aggregate(pipeline).exec();
+    const rows = Array.isArray(result?.data) ? result.data : [];
+    const total = Number(result?.total?.[0]?.count ?? 0);
+    const data = rows.map((row) => this.mapItemStockAuditLog(row as any));
+
+    return {
+      data,
+      page,
+      limit,
+      total,
+      hasNext: skip + data.length < total,
+      hasPrev: page > 1,
+    };
+  }
+
+  private buildItemStockChangesPipeline(
+    query: any,
+    skip: number,
+    limit: number,
+  ): PipelineStage[] {
+    const pipeline: PipelineStage[] = [
+      {
+        $match: this.buildItemStockChangesMatch(query),
+      },
+      {
+        $addFields: {
+          itemId: { $ifNull: ['$params.id', '$resourceId'] },
+          stockAction: {
+            $cond: [{ $eq: ['$method', 'POST'] }, 'created', 'updated'],
+          },
+        },
+      },
+    ];
+
+    const itemId =
+      typeof query?.itemId === 'string' ? query.itemId.trim() : '';
+    if (itemId) {
+      pipeline.push({
+        $match: { itemId },
+      });
+    }
+
+    pipeline.push(
+      { $sort: { timestamp: -1, createdAt: -1 } },
+      {
+        $facet: {
+          data: [
+            { $skip: skip },
+            { $limit: limit },
+            {
+              $lookup: {
+                from: 'users',
+                let: { auditUserId: '$userId' },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $eq: [{ $toString: '$_id' }, '$$auditUserId'],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      passwordHash: 0,
+                      pos_pin: 0,
+                      __v: 0,
+                    },
+                  },
+                ],
+                as: 'user',
+              },
+            },
+            {
+              $lookup: {
+                from: 'items',
+                let: { auditItemId: '$itemId' },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $eq: [{ $toString: '$_id' }, '$$auditItemId'],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      __v: 0,
+                    },
+                  },
+                ],
+                as: 'item',
+              },
+            },
+            {
+              $addFields: {
+                user: { $arrayElemAt: ['$user', 0] },
+                item: { $arrayElemAt: ['$item', 0] },
+              },
+            },
+          ],
+          total: [{ $count: 'count' }],
+        },
+      },
+    );
+
+    return pipeline;
+  }
+
+  private buildItemStockChangesMatch(
+    query?: any,
+  ): FilterQuery<AuditLogDocument> {
+    const filters: FilterQuery<AuditLogDocument>[] = [
+      {
+        $or: [
+          {
+            method: 'POST',
+            path: ITEM_CREATE_PATH_REGEX,
+            $or: [
+              { 'body.inStock': { $exists: true } },
+              { 'body.trackStock': { $exists: true } },
+            ],
+          },
+          {
+            method: { $in: ['PATCH', 'PUT'] },
+            path: ITEM_UPDATE_PATH_REGEX,
+            $or: [
+              { 'body.inStock': { $exists: true } },
+              { 'body.trackStock': { $exists: true } },
+            ],
+          },
+          {
+            method: 'PATCH',
+            path: ITEM_STOCK_PATH_REGEX,
+          },
+        ],
+      },
+    ];
+
+    const userId =
+      typeof query?.userId === 'string' ? query.userId.trim() : '';
+    if (userId) {
+      filters.push({ userId });
+    }
+
+    const from = this.parseDate(query?.from ?? query?.startDate);
+    const to = this.parseDate(query?.to ?? query?.endDate, true);
+    if (from || to) {
+      const timestamp: Record<string, Date> = {};
+      if (from) timestamp.$gte = from;
+      if (to) timestamp.$lte = to;
+      filters.push({ timestamp });
+    }
+
+    return filters.length === 1 ? filters[0] : { $and: filters };
+  }
+
+  private parseDate(value: unknown, endOfDay = false): Date | undefined {
+    if (typeof value !== 'string') return undefined;
+    const raw = value.trim();
+    if (!raw) return undefined;
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      const parsed = new Date(
+        `${raw}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}Z`,
+      );
+      return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+    }
+
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return undefined;
+
+    return parsed;
+  }
+
+  private mapItemStockAuditLog(row: Record<string, any>): ItemStockAuditLog {
+    const rawItemId = row?.itemId ?? row?.params?.id ?? row?.resourceId;
+    const itemId =
+      rawItemId === undefined || rawItemId === null
+        ? undefined
+        : String(rawItemId).trim() || undefined;
+
+    return {
+      ...(row as AuditLog),
+      itemId,
+      stockAction: row?.method === 'POST' ? 'created' : 'updated',
+      user:
+        row?.user && typeof row.user === 'object' && !Array.isArray(row.user)
+          ? row.user
+          : undefined,
+      item:
+        row?.item && typeof row.item === 'object' && !Array.isArray(row.item)
+          ? row.item
+          : undefined,
+    };
   }
 }

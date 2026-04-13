@@ -35,6 +35,9 @@ export class AuditLog {
   @Prop({ trim: true })
   userRole?: string;
 
+  @Prop({ trim: true })
+  resourceId?: string;
+
   @Prop({ type: Object })
   params?: Record<string, unknown>;
 

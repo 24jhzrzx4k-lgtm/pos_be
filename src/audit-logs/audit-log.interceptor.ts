@@ -52,6 +52,19 @@ function sanitize(value: unknown, depth = 0): unknown {
   return String(value);
 }
 
+function extractResourceId(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const raw = record._id ?? record.id;
+  if (raw === undefined || raw === null) return undefined;
+
+  const normalized = String(raw).trim();
+  return normalized || undefined;
+}
+
 @Injectable()
 export class AuditLogInterceptor implements NestInterceptor {
   constructor(private readonly auditLogsService: AuditLogsService) {}
@@ -111,6 +124,7 @@ export class AuditLogInterceptor implements NestInterceptor {
     const params = sanitize(req?.params) as Record<string, unknown> | undefined;
     const query = sanitize(req?.query) as Record<string, unknown> | undefined;
     const body = sanitize(req?.body);
+    let resourceId: string | undefined;
 
     const writeLog = async (
       user: { userId?: string; userRole?: string },
@@ -131,6 +145,7 @@ export class AuditLogInterceptor implements NestInterceptor {
           userAgent: userAgent || undefined,
           userId: user.userId,
           userRole: user.userRole,
+          resourceId,
           params,
           query,
           body,
@@ -146,6 +161,9 @@ export class AuditLogInterceptor implements NestInterceptor {
     return requestContext.run(user, () =>
       next.handle().pipe(
         tap({
+          next: (responseBody) => {
+            resourceId = extractResourceId(sanitize(responseBody));
+          },
           complete: () => {
             void writeLog(user, {
               statusCode: Number(res?.statusCode) || 200,
