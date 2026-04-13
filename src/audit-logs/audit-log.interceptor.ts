@@ -5,10 +5,13 @@ import {
   Injectable,
   NestInterceptor,
 } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 import { Observable, throwError } from 'rxjs';
 import { catchError, tap } from 'rxjs/operators';
 import { AuditLogsService } from './audit-logs.service';
 import { requestContext } from '../common/request-context';
+import { Item, ItemDocument } from '../items/schemas/item.schema';
 
 const SENSITIVE_KEYS = new Set([
   'password',
@@ -19,6 +22,15 @@ const SENSITIVE_KEYS = new Set([
   'refresh_token',
   'token',
 ]);
+
+const ITEM_CREATE_PATH_REGEX = /^\/items(?:\?.*)?$/;
+const ITEM_UPDATE_PATH_REGEX = /^\/items\/[^/?]+(?:\?.*)?$/;
+const ITEM_STOCK_PATH_REGEX = /^\/items\/[^/?]+\/stock(?:\?.*)?$/;
+
+type StockSnapshot = {
+  stock?: number;
+  trackStock?: boolean;
+};
 
 function sanitize(value: unknown, depth = 0): unknown {
   if (value === null || value === undefined) return value;
@@ -65,12 +77,71 @@ function extractResourceId(value: unknown): string | undefined {
   return normalized || undefined;
 }
 
+function hasOwn(obj: Record<string, unknown>, key: string) {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function extractStockSnapshot(
+  value: unknown,
+): StockSnapshot {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  const record = value as Record<string, unknown>;
+  const snapshot: StockSnapshot = {};
+
+  if (hasOwn(record, 'inStock')) {
+    const rawStock = record.inStock;
+    const stock =
+      typeof rawStock === 'number'
+        ? rawStock
+        : rawStock === null || rawStock === undefined || rawStock === ''
+          ? undefined
+          : Number(rawStock);
+    if (stock !== undefined && Number.isFinite(stock)) {
+      snapshot.stock = stock;
+    }
+  }
+
+  if (hasOwn(record, 'trackStock') && typeof record.trackStock === 'boolean') {
+    snapshot.trackStock = record.trackStock;
+  }
+
+  return snapshot;
+}
+
+function isStockAuditRequest(method: string, path: string, body: unknown) {
+  const normalizedBody =
+    body && typeof body === 'object' && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : undefined;
+  const touchesStock =
+    !!normalizedBody &&
+    (hasOwn(normalizedBody, 'inStock') || hasOwn(normalizedBody, 'trackStock'));
+
+  return (
+    (method === 'POST' && ITEM_CREATE_PATH_REGEX.test(path) && touchesStock) ||
+    ((method === 'PATCH' || method === 'PUT') &&
+      ITEM_UPDATE_PATH_REGEX.test(path) &&
+      touchesStock) ||
+    (method === 'PATCH' && ITEM_STOCK_PATH_REGEX.test(path))
+  );
+}
+
 @Injectable()
 export class AuditLogInterceptor implements NestInterceptor {
-  constructor(private readonly auditLogsService: AuditLogsService) {}
+  constructor(
+    private readonly auditLogsService: AuditLogsService,
+    @InjectModel(Item.name)
+    private readonly itemModel: Model<ItemDocument>,
+  ) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
-    console.log('AuditLogInterceptor triggered for HTTP request');
     if (context.getType() !== 'http') return next.handle();
     const http = context.switchToHttp();
     const req: any = http.getRequest();
@@ -124,7 +195,21 @@ export class AuditLogInterceptor implements NestInterceptor {
     const params = sanitize(req?.params) as Record<string, unknown> | undefined;
     const query = sanitize(req?.query) as Record<string, unknown> | undefined;
     const body = sanitize(req?.body);
+    const stockAuditRequest = isStockAuditRequest(method, path, body);
+    const requestedItemId =
+      typeof req?.params?.id === 'string' ? req.params.id.trim() : undefined;
+    const beforeSnapshotPromise: Promise<StockSnapshot> =
+      stockAuditRequest && requestedItemId
+        ? this.itemModel
+            .findById(requestedItemId)
+            .select({ inStock: 1, trackStock: 1 })
+            .lean()
+            .exec()
+            .then((item) => extractStockSnapshot(item))
+            .catch(() => ({} as StockSnapshot))
+        : Promise.resolve({} as StockSnapshot);
     let resourceId: string | undefined;
+    let afterSnapshot: StockSnapshot = {};
 
     const writeLog = async (
       user: { userId?: string; userRole?: string },
@@ -135,6 +220,7 @@ export class AuditLogInterceptor implements NestInterceptor {
       },
     ) => {
       try {
+        const beforeSnapshot = await beforeSnapshotPromise;
         await this.auditLogsService.create({
           timestamp,
           method,
@@ -146,6 +232,20 @@ export class AuditLogInterceptor implements NestInterceptor {
           userId: user.userId,
           userRole: user.userRole,
           resourceId,
+          beforeStock: isFiniteNumber(beforeSnapshot.stock)
+            ? beforeSnapshot.stock
+            : undefined,
+          afterStock: isFiniteNumber(afterSnapshot.stock)
+            ? afterSnapshot.stock
+            : undefined,
+          beforeTrackStock:
+            typeof beforeSnapshot.trackStock === 'boolean'
+              ? beforeSnapshot.trackStock
+              : undefined,
+          afterTrackStock:
+            typeof afterSnapshot.trackStock === 'boolean'
+              ? afterSnapshot.trackStock
+              : undefined,
           params,
           query,
           body,
@@ -162,7 +262,9 @@ export class AuditLogInterceptor implements NestInterceptor {
       next.handle().pipe(
         tap({
           next: (responseBody) => {
-            resourceId = extractResourceId(sanitize(responseBody));
+            const sanitizedResponseBody = sanitize(responseBody);
+            resourceId = extractResourceId(sanitizedResponseBody);
+            afterSnapshot = extractStockSnapshot(sanitizedResponseBody);
           },
           complete: () => {
             void writeLog(user, {

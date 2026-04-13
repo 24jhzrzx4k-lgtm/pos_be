@@ -14,6 +14,10 @@ export type ItemStockAuditLog = AuditLog & {
   updatedAt?: Date;
   itemId?: string;
   stockAction: 'created' | 'updated';
+  beforeStock?: number;
+  afterStock?: number;
+  beforeTrackStock?: boolean;
+  afterTrackStock?: boolean;
   user?: Record<string, unknown>;
   item?: Record<string, unknown>;
 };
@@ -220,6 +224,18 @@ export class AuditLogsService {
       ...(row as AuditLog),
       itemId,
       stockAction: row?.method === 'POST' ? 'created' : 'updated',
+      beforeStock:
+        typeof row?.beforeStock === 'number' ? row.beforeStock : undefined,
+      afterStock:
+        typeof row?.afterStock === 'number' ? row.afterStock : undefined,
+      beforeTrackStock:
+        typeof row?.beforeTrackStock === 'boolean'
+          ? row.beforeTrackStock
+          : undefined,
+      afterTrackStock:
+        typeof row?.afterTrackStock === 'boolean'
+          ? row.afterTrackStock
+          : undefined,
       user:
         row?.user && typeof row.user === 'object' && !Array.isArray(row.user)
           ? row.user
