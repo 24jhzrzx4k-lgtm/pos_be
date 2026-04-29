@@ -459,4 +459,123 @@ describe('SalesService', () => {
       }),
     );
   });
+
+  it('builds a monthly sales report for the selected month', async () => {
+    saleModel.aggregate.mockReturnValue({
+      exec: jest.fn().mockResolvedValue([
+        {
+          totals: [
+            {
+              currency: 'PHP',
+              grossSales: 3143724,
+              refunds: 0,
+              discounts: 56640,
+              netSales: 3087084,
+              salesTransactions: 48,
+              refundTransactions: 0,
+              receipts: 48,
+            },
+          ],
+          costOfGoods: [{ costOfGoods: 1785960 }],
+          series: [
+            {
+              x: '2026-04-07',
+              grossSales: 62400,
+              refunds: 0,
+              discounts: 1200,
+              netSales: 61200,
+              salesTransactions: 1,
+              refundTransactions: 0,
+              receipts: 1,
+            },
+            {
+              x: '2026-04-08',
+              grossSales: 176040,
+              refunds: 0,
+              discounts: 5040,
+              netSales: 171000,
+              salesTransactions: 2,
+              refundTransactions: 0,
+              receipts: 2,
+            },
+          ],
+          seriesCostOfGoods: [
+            { x: '2026-04-07', costOfGoods: 34440 },
+            { x: '2026-04-08', costOfGoods: 96540 },
+          ],
+        },
+      ]),
+    });
+
+    const result = await service.reportMonthlySales(
+      { month: '2026-04' },
+      'store-1',
+    );
+
+    expect(result).toMatchObject({
+      month: '2026-04',
+      from: '2026-04-01T00:00:00.000Z',
+      to: '2026-04-30T23:59:59.999Z',
+      currency: 'PHP',
+      summary: {
+        grossSales: 3143724,
+        refunds: 0,
+        discounts: 56640,
+        netSales: 3087084,
+        costOfGoods: 1785960,
+        grossProfit: 1301124,
+        salesTransactions: 48,
+        refundTransactions: 0,
+        receipts: 48,
+        averageSale: 64314.25,
+      },
+      data: [
+        {
+          date: '2026-04-07',
+          grossSales: 62400,
+          refunds: 0,
+          discounts: 1200,
+          netSales: 61200,
+          costOfGoods: 34440,
+          grossProfit: 26760,
+          salesTransactions: 1,
+          refundTransactions: 0,
+          receipts: 1,
+        },
+        {
+          date: '2026-04-08',
+          grossSales: 176040,
+          refunds: 0,
+          discounts: 5040,
+          netSales: 171000,
+          costOfGoods: 96540,
+          grossProfit: 74460,
+          salesTransactions: 2,
+          refundTransactions: 0,
+          receipts: 2,
+        },
+      ],
+    });
+
+    expect(saleModel.aggregate).toHaveBeenCalledTimes(1);
+
+    const pipeline = saleModel.aggregate.mock.calls[0][0];
+    expect(pipeline[0]).toEqual({
+      $match: {
+        storeId: 'store-1',
+        createdAt: {
+          $gte: new Date('2026-04-01T00:00:00.000Z'),
+          $lte: new Date('2026-04-30T23:59:59.999Z'),
+        },
+      },
+    });
+    expect(pipeline[1].$facet).toEqual(
+      expect.objectContaining({
+        totals: expect.any(Array),
+        costOfGoods: expect.any(Array),
+        series: expect.any(Array),
+        seriesCostOfGoods: expect.any(Array),
+      }),
+    );
+  });
 });

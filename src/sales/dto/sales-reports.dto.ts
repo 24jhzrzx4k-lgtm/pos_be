@@ -106,6 +106,28 @@ export type SalesSummaryReport = {
   previous: SalesSummaryRange;
 };
 
+export type MonthlySalesRow = {
+  date: string;
+  grossSales: number;
+  refunds: number;
+  discounts: number;
+  netSales: number;
+  costOfGoods: number;
+  grossProfit: number;
+  salesTransactions: number;
+  refundTransactions: number;
+  receipts: number;
+};
+
+export type MonthlySalesReport = {
+  month: string;
+  from: string;
+  to: string;
+  currency: string;
+  summary: SalesSummaryTotals;
+  data: MonthlySalesRow[];
+};
+
 export type ReceiptsReportRow = {
   id: string;
   receiptNo: string;

@@ -13,6 +13,8 @@ import { UsersService } from '../users/users.service';
 import { PaginationResult, parsePagination } from '../common/pagination';
 import type {
   EndOfDayCashReport,
+  MonthlySalesReport,
+  MonthlySalesRow,
   ReceiptsReportRow,
   SalesByCategoryRow,
   SalesByEmployeeRow,
@@ -245,6 +247,61 @@ export class SalesService {
     });
     if (from > to) throw new BadRequestException('from must be <= to');
     return { from, to };
+  }
+
+  private parseMonthKey(query: any): string | undefined {
+    const rawMonthValue =
+      typeof query?.month === 'string' || typeof query?.month === 'number'
+        ? String(query.month).trim()
+        : '';
+
+    const compactMonthMatch = rawMonthValue.match(/^(\d{4})-(\d{1,2})$/);
+    if (compactMonthMatch) {
+      const year = Number(compactMonthMatch[1]);
+      const month = Number(compactMonthMatch[2]);
+      if (month < 1 || month > 12) {
+        throw new BadRequestException('month must be between 1 and 12');
+      }
+      return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`;
+    }
+
+    const rawYearValue =
+      typeof query?.year === 'string' || typeof query?.year === 'number'
+        ? String(query.year).trim()
+        : '';
+    if (/^\d{4}$/.test(rawYearValue) && /^\d{1,2}$/.test(rawMonthValue)) {
+      const month = Number(rawMonthValue);
+      if (month < 1 || month > 12) {
+        throw new BadRequestException('month must be between 1 and 12');
+      }
+      return `${rawYearValue}-${String(month).padStart(2, '0')}`;
+    }
+
+    if (rawMonthValue) {
+      throw new BadRequestException('month must be in YYYY-MM format');
+    }
+
+    return undefined;
+  }
+
+  private parseMonthlyReportRange(query: any): {
+    from: Date;
+    to: Date;
+    month: string;
+  } {
+    const monthKey = this.parseMonthKey(query);
+    if (!monthKey) {
+      const { from, to } = this.parseReportRange(query);
+      return { from, to, month: from.toISOString().slice(0, 7) };
+    }
+
+    const [yearStr, monthStr] = monthKey.split('-');
+    const year = Number(yearStr);
+    const monthIndex = Number(monthStr) - 1;
+    const from = new Date(Date.UTC(year, monthIndex, 1, 0, 0, 0, 0));
+    const to = new Date(Date.UTC(year, monthIndex + 1, 0, 23, 59, 59, 999));
+
+    return { from, to, month: monthKey };
   }
 
   private parseEmployeeId(query: any): string | undefined {
@@ -1377,6 +1434,47 @@ export class SalesService {
         totals: previousRange.totals,
         series: previousRange.series,
       },
+    };
+  }
+
+  async reportMonthlySales(
+    query: any,
+    storeId?: string,
+  ): Promise<MonthlySalesReport> {
+    const { from, to, month } = this.parseMonthlyReportRange(query);
+    const transactionType = this.parseTransactionTypeFromQuery(query);
+    const storeIdNormalized = storeId?.trim() || undefined;
+
+    const match: Record<string, unknown> = {
+      ...(storeIdNormalized ? { storeId: storeIdNormalized } : {}),
+      ...(transactionType ? { transactionType } : {}),
+      createdAt: { $gte: from, $lte: to },
+    };
+
+    const employeeId = this.parseEmployeeId(query);
+    if (employeeId) match['cashier.id'] = employeeId;
+
+    const range = await this.aggregateSalesSummaryRange(match, from, to, 'day');
+    const data: MonthlySalesRow[] = range.series.map(row => ({
+      date: row.x,
+      grossSales: row.grossSales,
+      refunds: row.refunds,
+      discounts: row.discounts,
+      netSales: row.netSales,
+      costOfGoods: row.costOfGoods,
+      grossProfit: row.grossProfit,
+      salesTransactions: row.salesTransactions,
+      refundTransactions: row.refundTransactions,
+      receipts: row.receipts,
+    }));
+
+    return {
+      month,
+      from: range.from,
+      to: range.to,
+      currency: range.currency || 'PHP',
+      summary: range.totals,
+      data,
     };
   }
 

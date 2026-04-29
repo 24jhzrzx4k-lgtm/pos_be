@@ -146,6 +146,12 @@ export class SalesController {
     return this.salesService.reportSummary(query, storeId);
   }
 
+  @Get('reports/monthly-sales')
+  reportMonthlySales(@Req() req: any, @Query() query: any) {
+    const storeId = resolveStoreIdForRequest(query, req?.user);
+    return this.salesService.reportMonthlySales(query, storeId);
+  }
+
   @Get('reports/receipts')
   reportReceipts(@Req() req: any, @Query() query: any) {
     const storeId = resolveStoreIdForRequest(query, req?.user);

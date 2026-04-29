@@ -13,6 +13,7 @@ describe('SalesController', () => {
     reportByEmployee: jest.fn(),
     reportByPaymentType: jest.fn(),
     reportSummary: jest.fn(),
+    reportMonthlySales: jest.fn(),
     reportReceipts: jest.fn(),
     reportEndOfDayCash: jest.fn(),
     findOne: jest.fn(),
@@ -103,5 +104,22 @@ describe('SalesController', () => {
     controller.reportSummary(req, query);
 
     expect(salesService.reportSummary).toHaveBeenCalledWith(query, 'store-1');
+  });
+
+  it('delegates monthly sales reports using the request store scope', () => {
+    const req = {
+      user: {
+        storeId: 'store-1',
+        role: 'cashier',
+      },
+    };
+    const query = { month: '2026-04' };
+
+    controller.reportMonthlySales(req, query);
+
+    expect(salesService.reportMonthlySales).toHaveBeenCalledWith(
+      query,
+      'store-1',
+    );
   });
 });
